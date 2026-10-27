@@ -1,0 +1,7 @@
+# Build output (./build.sh, ./package.sh)
+output/
+
+# Saved localStorage from running apps
+.localstorage*.json
+
+.DS_Store

@@ -1,0 +1,8 @@
+{
+    "name": "HTML Apps",
+    "loadsBackend": true,
+    "entry": "/ui/main.qml",
+    "id": "htmlload",
+    "supportsScaling": true,
+    "canHaveMultipleFrontends": false
+}
