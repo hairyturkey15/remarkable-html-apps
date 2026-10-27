@@ -14,6 +14,7 @@ rm -rf "$STAGE" "output/$NAME.zip"
 mkdir -p "$STAGE/appload"
 cp -R output/htmlload "$STAGE/appload/htmlload"
 cp -R output/html-apps "$STAGE/html-apps"
+cp LICENSE "$STAGE/LICENSE"
 
 cat > "$STAGE/install.sh" <<'EOF'
 #!/bin/bash
