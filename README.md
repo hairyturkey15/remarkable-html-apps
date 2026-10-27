@@ -4,6 +4,24 @@ Run folders of HTML on the reMarkable through AppLoad, either from a launcher
 ("HTML Apps") or packaged as their own AppLoad entries. Includes a chess
 game built for it.
 
+## Install (no build tools needed)
+
+Requirements: a reMarkable Paper Pro, Paper Pro Move or Paper Pure (64-bit)
+in developer mode, with xovi and AppLoad installed.
+
+1. Download `remarkable-html-apps-<version>.zip` from the
+   [Releases](../../releases) page and unzip it.
+2. Connect the tablet by USB and keep its screen on. If you use a VPN, allow
+   local network traffic, or 10.11.99.1 won't be reachable.
+3. In the unzipped folder, run `./install.sh` (Linux or macOS). It asks for
+   the tablet's root password once. Or copy the files by hand:
+
+   ```bash
+   scp -r appload html-apps root@10.11.99.1:/home/root/xovi/exthome/
+   ```
+
+4. On the tablet, open AppLoad, reload its app list, and start **HTML Apps**.
+
 ## Why it works this way
 
 The tablet has no web engine (no QtWebEngine/Chromium), so a real browser
@@ -42,14 +60,24 @@ An HTML folder can include an optional `manifest.json`
 (`{"name": "...", "entry": "index.html", "icon": "icon.png"}`). Without one,
 the `<title>` and an `icon.png` are used if present.
 
-## Build and deploy
+## Build from source
 
-Needs Qt's `rcc` (`brew install qtbase`) and `zig` (`brew install zig`);
-both are already set up for the Calculator project.
+You need Qt's `rcc` and an aarch64 C compiler (`zig`, or a cross-gcc):
+
+| OS | rcc | compiler |
+|---|---|---|
+| macOS | `brew install qtbase` | `brew install zig` |
+| Debian/Ubuntu | `sudo apt install qt6-base-dev-tools` | `sudo apt install gcc-aarch64-linux-gnu` |
+| Fedora | `sudo dnf install qt6-qtbase-devel` | zig from ziglang.org |
+| Arch | `sudo pacman -S qt6-base` | `sudo pacman -S zig` |
+
+The scripts look for `rcc` in the usual Qt 6 (and Qt 5) locations on each
+distro. Set `RCC=/path/to/rcc` or `BACKEND_CC=<compiler>` to override.
 
 ```bash
 ./build.sh                # -> output/htmlload and output/html-apps
-./deploy.sh 10.11.99.1    # scp both to the tablet
+./deploy.sh 10.11.99.1    # copy both to the tablet over one SSH connection
+./release.sh v1.0.0       # -> output/remarkable-html-apps-v1.0.0.zip
 ```
 
 Then open **HTML Apps** from AppLoad. To add another app, copy its folder into
@@ -119,18 +147,15 @@ node render-3d.js ../apps/chess/pieces/3d 256
   QML_XHR_ALLOW_FILE_READ=1 qml -I . run.qml -- --apps "$PWD/../apps"
   ```
 
-## Not yet verified on the tablet
+## Tested on
 
-Everything above ran on a Mac (the real QML runtime under Qt 6.11, and a
-browser). It has not been run on the device yet, so these are the things to
-watch:
+A reMarkable Paper Pure (xochitl on Qt 6.8.2) with xovi and AppLoad: the
+launcher, chess and the release installer all run there. Notes:
 
-1. **Qt version on the tablet.** The runtime needs Proxy, Promise and the
-   `Function` constructor, all standard in Qt 6's JS engine. If a page fails to
-   load, the error appears in a box at the bottom of the screen.
-2. **Pen vs finger.** Input uses a plain `MouseArea`, like the Calculator and
-   Shape3D apps.
-3. **Bot speed.** A move takes about 90 ms worst case on the Mac. The tablet's
-   CPU is much slower, so expect up to a few seconds on Hard in crazyhouse. If
-   it's too slow, lower `nodes` in `apps/chess/js/bot.js` (`LEVELS`).
-4. **Backend log:** `/tmp/htmlload-debug.log` on the tablet.
+- **Bot speed.** A move takes about 90 ms worst case on a Mac and is slower
+  on the tablet. If Hard feels sluggish, lower `nodes` in
+  `apps/chess/js/bot.js` (`LEVELS`).
+- **Ghosting.** E-ink keeps faint traces of earlier frames; chess has a
+  Refresh button that flashes the screen to clear them.
+- **Logs.** The backend writes `/tmp/htmlload-debug.log`; page errors show in
+  a box at the bottom of the screen and in `journalctl -u xochitl`.
