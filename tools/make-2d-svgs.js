@@ -1,11 +1,14 @@
 // Writes the flat "2D" piece set as SVG (100x100 viewBox), one file per
-// piece, into tools/svg2d/. render-png.qml then rasterizes them with Qt.
+// piece, into tools/svg2d/ - or, with the argument "bw", the pure
+// black-and-white set (no gradients) into tools/svgbw/. render-png.qml then
+// rasterizes them with Qt.
 // Original artwork in a chunky, rounded "neo" style - tuned for e-ink:
 // bold outlines, white pieces stay light on dark squares, black pieces
 // keep light detail lines so their shapes read on dark squares too.
 const fs = require("fs");
 const path = require("path");
-const out = path.join(__dirname, "svg2d");
+const BW = process.argv[2] === "bw";
+const out = path.join(__dirname, BW ? "svgbw" : "svg2d");
 
 const BASE = '<rect x="22" y="80" width="56" height="11" rx="4"/>';
 const COLLAR = (x0, x1, y0, y1) => `<rect x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" rx="3"/>`;
@@ -57,7 +60,10 @@ const SHAPES = {
   }
 };
 
-const STYLES = {
+const STYLES = BW ? {
+  w: { light: "#ffffff", dark: "#ffffff", stroke: "#000000", detail: "#000000", eye: "#000000" },
+  b: { light: "#000000", dark: "#000000", stroke: "#000000", detail: "#ffffff", eye: "#ffffff" }
+} : {
   w: { light: "#ffffff", dark: "#d4d4d4", stroke: "#161616", detail: "#161616", eye: "#161616" },
   b: { light: "#5c5c5c", dark: "#1f1f1f", stroke: "#000000", detail: "#d8d8d8", eye: "#e8e8e8" }
 };
@@ -72,6 +78,7 @@ for (const c of ["w", "b"]) {
       <stop offset="0" stop-color="${st.light}"/><stop offset="1" stop-color="${st.dark}"/>
     </linearGradient>
   </defs>
+  ${BW ? `<g fill="#ffffff" stroke="#ffffff" stroke-width="10" stroke-linejoin="round">${SHAPES[t].body}</g>` : ""}
   <g fill="url(#g)" stroke="${st.stroke}" stroke-width="3.6" stroke-linejoin="round">
     ${SHAPES[t].body}
   </g>

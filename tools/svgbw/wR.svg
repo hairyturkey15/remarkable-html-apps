@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0.25">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+  </defs>
+  <g fill="#ffffff" stroke="#ffffff" stroke-width="10" stroke-linejoin="round"><rect x="22" y="80" width="56" height="11" rx="4"/>
+      <rect x="26" y="72" width="48" height="9" rx="3"/>
+      <path d="M32 73 L35 41 L65 41 L68 73 Z"/>
+      <rect x="28" y="34" width="44" height="8" rx="3"/>
+      <path d="M27 35 L27 16 Q27 14 29 14 L36 14 Q38 14 38 16 L38 22 L44.5 22 L44.5 16 Q44.5 14 46.5 14 L53.5 14 Q55.5 14 55.5 16 L55.5 22 L62 22 L62 16 Q62 14 64 14 L71 14 Q73 14 73 16 L73 35 Z"/></g>
+  <g fill="url(#g)" stroke="#000000" stroke-width="3.6" stroke-linejoin="round">
+    <rect x="22" y="80" width="56" height="11" rx="4"/>
+      <rect x="26" y="72" width="48" height="9" rx="3"/>
+      <path d="M32 73 L35 41 L65 41 L68 73 Z"/>
+      <rect x="28" y="34" width="44" height="8" rx="3"/>
+      <path d="M27 35 L27 16 Q27 14 29 14 L36 14 Q38 14 38 16 L38 22 L44.5 22 L44.5 16 Q44.5 14 46.5 14 L53.5 14 Q55.5 14 55.5 16 L55.5 22 L62 22 L62 16 Q62 14 64 14 L71 14 Q73 14 73 16 L73 35 Z"/>
+  </g>
+  <g fill="none" stroke="#000000" stroke-width="2.6" stroke-linecap="round">
+    <path d="M36 49 L64 49 M35 66 L65 66"/>
+  </g>
+</svg>
