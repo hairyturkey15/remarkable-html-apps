@@ -37,6 +37,11 @@ mkdir -p "$OUT/backend" "$OUT/www"
 "$RCC" --binary -o "$OUT/resources.rcc" "$STAGE/application.qrc"
 build_backend "$OUT/backend/entry"
 copy_app "$SRC" "$OUT/www"
+# Apps load the shared kit from ../shared/; a package carries its own copy.
+if grep -q '\.\./shared/' "$OUT/www/index.html" 2>/dev/null; then
+    copy_app apps/shared "$OUT/www/shared"
+    sed 's#\.\./shared/#shared/#g' "$OUT/www/index.html" > "$OUT/www/index.html.tmp" && mv "$OUT/www/index.html.tmp" "$OUT/www/index.html"
+fi
 if [ -f "$SRC/icon.png" ]; then cp "$SRC/icon.png" "$OUT/icon.png"; else cp icon.png "$OUT/icon.png"; fi
 cat > "$OUT/manifest.json" <<JSON
 {

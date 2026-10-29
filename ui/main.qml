@@ -62,6 +62,13 @@ Rectangle {
             if (!req) return;
             delete pending["store:" + key];
             req.callback(null, rest);
+        } else if (type === 104) {
+            const req = pending["save:" + key];
+            if (!req) { console.log("[htmlload] save reply for unknown request " + key); return; }
+            delete pending["save:" + key];
+            const nl2 = rest.indexOf("\n");
+            const ok = rest.substring(0, nl2) === "ok";
+            req.callback(ok ? null : rest.substring(nl2 + 1), ok ? rest.substring(nl2 + 1) : null);
         }
     }
 
@@ -76,8 +83,36 @@ Rectangle {
         backend.sendMessage(3, dir);
     }
 
+    // A single AppLoad message must fit the socket buffer (~208 KB), so
+    // long ones go as type-7 parts that the backend joins to the last piece.
+    function send(type, text) {
+        const max = 60000;  // chars; at most 3 UTF-8 bytes each
+        let i = 0;
+        while (text.length - i > max) {
+            let end = i + max;
+            const c = text.charCodeAt(end - 1);
+            if (c >= 0xD800 && c <= 0xDBFF) end--;  // keep surrogate pairs whole
+            backend.sendMessage(7, text.substring(i, end));
+            i = end;
+        }
+        backend.sendMessage(type, i ? text.substring(i) : text);
+    }
+
     function saveStore(dir, json) {
-        backend.sendMessage(4, dir + "\n" + json);
+        send(4, dir + "\n" + json);
+    }
+
+    // data is base64; the backend writes it into the exports folder.
+    function saveFile(name, base64, callback) {
+        const id = String(nextRequestId++);
+        pending["save:" + id] = { callback: callback };
+        send(5, id + "\n" + name + "\n" + base64);
+    }
+
+    function importPdf(name, title, callback) {
+        const id = String(nextRequestId++);
+        pending["save:" + id] = { callback: callback };
+        backend.sendMessage(6, id + "\n" + name + "\n" + title);
     }
 
     function refreshList() {

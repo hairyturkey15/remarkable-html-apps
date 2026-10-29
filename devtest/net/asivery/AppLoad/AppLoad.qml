@@ -8,6 +8,7 @@ QtObject {
     property string applicationID
     signal messageReceived(int type, string contents)
 
+    property string exportsDir: appsDir + "/../devtest/exports"
     property string appsDir: {
         const a = Qt.application.arguments;
         const i = a.indexOf("--apps");
@@ -26,11 +27,25 @@ QtObject {
         return x.status === 200 || x.status === 0 ? x.responseText : null;
     }
 
+    // Type-7 parts are joined onto the next message, like the real backend.
+    property string part: ""
     function sendMessage(type, msg) {
+        if (type === 7) { part += msg; return; }
+        if (part) { msg = part + msg; part = ""; }
+        if (type === 5 || type === 6) {
+            // Pretend to save: report the size, keep nothing.
+            const parts = msg.split("\n");
+            console.log("SAVE", type, parts[1], (parts[2] || "").length, "base64 chars");
+            later(() => messageReceived(104, parts[0] + "\nok\n" + exportsDir + "/" + parts[1]));
+            return;
+        }
         if (type === 1) {
-            later(() => messageReceived(100, JSON.stringify([
-                { name: "Chess", dir: appsDir + "/chess", entry: "index.html", icon: "icon.png", standalone: false }
-            ])));
+            // --list chess,spider,...  (QML can't list directories itself)
+            const a = Qt.application.arguments, i = a.indexOf("--list");
+            const names = i >= 0 ? a[i + 1].split(",") : ["chess"];
+            later(() => messageReceived(100, JSON.stringify(names.map(n => (
+                { name: n, dir: appsDir + "/" + n, entry: "index.html", icon: "icon.png", standalone: false, exports: exportsDir }
+            )))));
         } else if (type === 2) {
             const nl = msg.indexOf("\n"), id = msg.substring(0, nl), path = msg.substring(nl + 1);
             const text = readFile(path);

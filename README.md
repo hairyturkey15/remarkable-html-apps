@@ -1,8 +1,25 @@
-# HTML Apps for AppLoad (+ Chess)
+# HTML Apps for AppLoad
 
 Run folders of HTML on the reMarkable through AppLoad, either from a launcher
-("HTML Apps") or packaged as their own AppLoad entries. Includes a chess
-game built for it.
+("HTML Apps") or packaged as their own AppLoad entries. Comes with a set of
+apps built for it:
+
+| App | What it does |
+|---|---|
+| Chess | Standard, atomic, crazyhouse, horde; bot; clock; position editor; 2D/3D pieces |
+| Chess Variants | Black-and-white chess with chess.com's variant set: Chess960, 3-Check, King of the Hill, Crazyhouse, Atomic, Horde, Fog of War, Giveaway, Torpedo, Sideways Pawns, No Castling, Capture Anything, Chaturanga, Duck Chess, Blindfold |
+| Spider | 1 suit (black), 2 suits (red/black) or 4; unlimited undo; optional "fill empty columns before dealing" rule |
+| Solitaire | Klondike, draw 1 or 3, unlimited undo, hints, auto-finish |
+| Checkers | American rules, compulsory captures (optional), bot with 3 levels or two players |
+| Hexline | An original hex-grid line puzzle with rotation and combo scoring |
+| Calculator | Keypad calculator, function graphing, unit converter, formula table, light scripting |
+| Periodic Table | All 118 elements with discovery, uses, facts, configurations and orbital pictures; reaction balancer/analyser (redox, ΔH, predictions with confidence labels); spectra and X-ray lines |
+| Mohs Hardness | Scale, ~150 materials (elements, steels, ceramics, gems, biological, superhard), Mohs/Vickers/Knoop/Rockwell/Brinell/Shore converters, temperature notes |
+| Score | Music notation editor with a music keypad; PDF and MIDI export |
+| Mandelbrot | Perturbation + series approximation + rebasing deep zoom, guessing refinement, lossless PNG export |
+| Circuit | Logic and electronics diagrams with live logic simulation and truth tables |
+
+Every app has Refresh (clears e-ink ghosting) and Exit buttons.
 
 ## Install (no build tools needed)
 
@@ -40,6 +57,18 @@ for canvas apps**:
 - HTML layout and CSS are **not** rendered. Pages that draw everything on
   one `<canvas>` work; DOM-heavy pages (forms, divs, CSS layout) do not.
 
+Tablet-only extras on `window.htmlload`: `refresh(ms)` (native full-screen
+black/white flash), `saveFile(name, data)` and `saveCanvas(name)` (write to
+the exports folder), `importPdf(name, title)` (copy an exported PDF into My
+Files; it shows up after the tablet restarts), and `htmlpinch` events for
+two-finger pinch. `putImageData` is mapped onto QML's `drawImage`, since
+QML's own `putImageData` draws nothing.
+
+Shared app kit: `apps/shared/rmkit.js` (toolbar with Refresh/Exit, tap
+targets, drags, pinch, on-screen keyboard, dialogs, storage, export) and
+`apps/shared/cards.js` (card drawing). Apps load them from `../shared/`;
+`package.sh` bundles them into packaged apps.
+
 E-ink behavior: nothing runs on its own. The canvas repaints only after a
 touch, a timer the page itself set, or an image load, and only if the page
 drew something during that callback.
@@ -54,7 +83,11 @@ Reads are confined to the app folders.
 ```
 /home/root/xovi/exthome/appload/htmlload/   the "HTML Apps" launcher (an AppLoad app)
 /home/root/xovi/exthome/html-apps/<name>/   drop-in HTML folders, each with index.html
+/home/root/xovi/exthome/html-exports/       files apps save (PDF, MIDI, PNG, ...)
 ```
+
+Copy exports to your computer with
+`scp -r root@10.11.99.1:/home/root/xovi/exthome/html-exports .`
 
 An HTML folder can include an optional `manifest.json`
 (`{"name": "...", "entry": "index.html", "icon": "icon.png"}`). Without one,

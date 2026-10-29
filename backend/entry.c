@@ -16,11 +16,18 @@
 //   2 READ        "<reqId>\n<abs path>"   -> 101 (one or more) or 102
 //   3 STORE_LOAD  "<app dir>"            -> 103
 //   4 STORE_SAVE  "<app dir>\n<json>"     (no reply)
+//   5 SAVE_FILE   "<reqId>\n<name>\n<base64 data>"   -> 104
+//   6 IMPORT_PDF  "<reqId>\n<exported name>\n<title>" -> 104
 // Backend -> frontend
 //   100 LIST_RESULT  JSON array of apps
 //   101 READ_CHUNK   "<reqId>\n<index>\n<count>\n<data>"
 //   102 READ_ERROR   "<reqId>\n<message>"
 //   103 STORE_DATA   "<app dir>\n<json or empty>"
+//   104 SAVE_RESULT  "<reqId>\nok\n<path>" or "<reqId>\nerror\n<message>"
+//
+// Saved files go to one exports folder (html-exports/ next to html-apps/,
+// or exports/ inside a packaged app). IMPORT_PDF copies an exported PDF
+// into the tablet's document library so it shows up in My Files.
 // Framework:
 //   -2 (0xFFFFFFFE) a frontend attached -> we push LIST_RESULT unprompted,
 //   because the frontend's own first LIST can race our connect().
@@ -37,6 +44,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 enum {
@@ -44,10 +52,14 @@ enum {
   MSG_READ = 2,
   MSG_STORE_LOAD = 3,
   MSG_STORE_SAVE = 4,
+  MSG_SAVE_FILE = 5,
+  MSG_IMPORT_PDF = 6,
+  MSG_PART = 7,
   MSG_LIST_RESULT = 100,
   MSG_READ_CHUNK = 101,
   MSG_READ_ERROR = 102,
   MSG_STORE_DATA = 103,
+  MSG_SAVE_RESULT = 104,
   SYS_NEW_COORDINATOR = -2,
 };
 
@@ -65,6 +77,7 @@ typedef struct {
 static char g_roots[MAX_ROOTS][PATH_MAX];
 static int g_standalone[MAX_ROOTS];
 static int g_rootCount = 0;
+static char g_exports[PATH_MAX] = "";
 static FILE *g_log = NULL;
 
 static void dlog(const char *fmt, ...) {
@@ -254,6 +267,8 @@ static int describe_app(Buf *out, const char *dir, const char *fallbackName, int
   buf_json_string(out, entry);
   buf_puts(out, ",\"icon\":");
   buf_json_string(out, icon);
+  buf_puts(out, ",\"exports\":");
+  buf_json_string(out, g_exports);
   buf_puts(out, standalone ? ",\"standalone\":true}" : ",\"standalone\":false}");
   return 1;
 }
@@ -398,6 +413,156 @@ static void handle_store_save(const char *payload) {
 }
 
 // ---------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------
+
+static void send_save_result(int fd, const char *reqId, int ok, const char *text) {
+  Buf out = {0};
+  buf_puts(&out, reqId);
+  buf_puts(&out, ok ? "\nok\n" : "\nerror\n");
+  buf_puts(&out, text);
+  send_msg(fd, MSG_SAVE_RESULT, out.data, out.len);
+  free(out.data);
+}
+
+// Splits "a\nb\nrest" in place; returns the number of fields found.
+static int split_fields(char *payload, char **fields, int max) {
+  int n = 0;
+  char *p = payload;
+  while (n < max - 1) {
+    char *nl = strchr(p, '\n');
+    if (!nl) break;
+    *nl = 0;
+    fields[n++] = p;
+    p = nl + 1;
+  }
+  fields[n++] = p;
+  return n;
+}
+
+// Names are plain file names: no directories, nothing hidden.
+static int name_ok(const char *name) {
+  if (!name[0] || name[0] == '.' || strlen(name) > 120) return 0;
+  for (const char *c = name; *c; c++) {
+    if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') ||
+          *c == '.' || *c == '-' || *c == '_' || *c == ' ')) return 0;
+  }
+  return 1;
+}
+
+static int b64_value(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+' || c == '-') return 62;
+  if (c == '/' || c == '_') return 63;
+  return -1;
+}
+
+static size_t b64_decode(const char *in, unsigned char *out) {
+  size_t n = 0;
+  int bits = 0, acc = 0;
+  for (; *in; in++) {
+    int v = b64_value(*in);
+    if (v < 0) continue;  // padding, whitespace
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[n++] = (unsigned char)((acc >> bits) & 0xFF);
+    }
+  }
+  return n;
+}
+
+static void handle_save_file(int fd, char *payload) {
+  char *f[3];
+  if (split_fields(payload, f, 3) < 3) return;
+  if (!name_ok(f[1])) {
+    send_save_result(fd, f[0], 0, "invalid file name");
+    return;
+  }
+  if (!g_exports[0] || (mkdir(g_exports, 0755) != 0 && errno != EEXIST)) {
+    send_save_result(fd, f[0], 0, "no exports folder");
+    return;
+  }
+  char path[PATH_MAX], tmp[PATH_MAX];
+  snprintf(path, sizeof path, "%s/%s", g_exports, f[1]);
+  snprintf(tmp, sizeof tmp, "%s.tmp", path);
+  unsigned char *data = malloc(strlen(f[2]) * 3 / 4 + 4);
+  size_t len = b64_decode(f[2], data);
+  FILE *out = fopen(tmp, "wb");
+  if (!out || fwrite(data, 1, len, out) != len) {
+    if (out) fclose(out);
+    free(data);
+    send_save_result(fd, f[0], 0, strerror(errno));
+    return;
+  }
+  fclose(out);
+  free(data);
+  rename(tmp, path);
+  dlog("saved %s (%zu bytes)", path, len);
+  send_save_result(fd, f[0], 1, path);
+}
+
+// Adds an exported PDF to xochitl's document store. The tablet's library
+// only picks new documents up after xochitl restarts (or the tablet reboots).
+static void handle_import_pdf(int fd, char *payload) {
+  char *f[3];
+  if (split_fields(payload, f, 3) < 3) return;
+  const char *lib = "/home/root/.local/share/remarkable/xochitl";
+  char src[PATH_MAX], uuid[64] = "", path[PATH_MAX];
+  if (!name_ok(f[1]) || !dir_exists(lib)) {
+    send_save_result(fd, f[0], 0, "no document library on this device");
+    return;
+  }
+  snprintf(src, sizeof src, "%s/%s", g_exports, f[1]);
+  size_t len = 0;
+  char *pdf = read_file(src, &len);
+  FILE *u = fopen("/proc/sys/kernel/random/uuid", "r");
+  if (u) {
+    if (fgets(uuid, sizeof uuid, u)) uuid[strcspn(uuid, "\n")] = 0;
+    fclose(u);
+  }
+  if (!pdf || !uuid[0]) {
+    free(pdf);
+    send_save_result(fd, f[0], 0, "could not read the exported PDF");
+    return;
+  }
+  snprintf(path, sizeof path, "%s/%s.pdf", lib, uuid);
+  FILE *out = fopen(path, "wb");
+  if (!out) {
+    free(pdf);
+    send_save_result(fd, f[0], 0, strerror(errno));
+    return;
+  }
+  fwrite(pdf, 1, len, out);
+  fclose(out);
+  free(pdf);
+
+  long long now = (long long)time(NULL) * 1000;
+  Buf meta = {0};
+  char num[64];
+  buf_puts(&meta, "{\"createdTime\":\"");
+  snprintf(num, sizeof num, "%lld", now);
+  buf_puts(&meta, num);
+  buf_puts(&meta, "\",\"lastModified\":\"");
+  buf_puts(&meta, num);
+  buf_puts(&meta, "\",\"parent\":\"\",\"pinned\":false,\"type\":\"DocumentType\",\"visibleName\":");
+  buf_json_string(&meta, f[2][0] ? f[2] : f[1]);
+  buf_puts(&meta, "}");
+  snprintf(path, sizeof path, "%s/%s.metadata", lib, uuid);
+  out = fopen(path, "wb");
+  if (out) { fwrite(meta.data, 1, meta.len, out); fclose(out); }
+  free(meta.data);
+  snprintf(path, sizeof path, "%s/%s.content", lib, uuid);
+  out = fopen(path, "wb");
+  if (out) { fputs("{\"fileType\":\"pdf\"}", out); fclose(out); }
+  dlog("imported %s as %s", src, uuid);
+  send_save_result(fd, f[0], 1, uuid);
+}
+
+// ---------------------------------------------------------------------
 
 static void add_root(const char *path, int standalone) {
   if (g_rootCount >= MAX_ROOTS || !dir_exists(path)) return;
@@ -421,6 +586,7 @@ static void setup_roots(int argc, char **argv) {
     char www[PATH_MAX];
     snprintf(www, sizeof www, "%s/www", exe);
     add_root(www, 1);
+    if (g_rootCount > 0) snprintf(g_exports, sizeof g_exports, "%s/exports", exe);
   }
   if (g_rootCount > 0) return;
 
@@ -428,6 +594,12 @@ static void setup_roots(int argc, char **argv) {
   if (argc >= 3) add_root(argv[2], 0);
   else if (env && *env) add_root(env, 0);
   else add_root("/home/root/xovi/exthome/html-apps", 0);
+  // Shared exports folder next to the apps folder.
+  if (g_rootCount > 0) {
+    snprintf(g_exports, sizeof g_exports, "%s", g_roots[0]);
+    char *slash = strrchr(g_exports, '/');
+    if (slash) strcpy(slash + 1, "html-exports");
+  }
 }
 
 int main(int argc, char **argv) {
@@ -467,22 +639,77 @@ int main(int argc, char **argv) {
   // Grows to the largest message seen (localStorage saves can be big).
   size_t cap = 64 * 1024;
   char *payload = malloc(cap + 1);
+  // AppLoad can't send one datagram over the socket's buffer size (~208 KB),
+  // so the frontend splits big messages: MSG_PART pieces are collected here
+  // and prepended to the next real message.
+  char *part = NULL;
+  size_t partLen = 0;
+  Header h;
+  int haveHeader = 0;
   for (;;) {
-    Header h;
-    ssize_t r = recv(fd, &h, sizeof h, 0);
-    if (r <= 0) break;
+    ssize_t r;
+    if (!haveHeader) {
+      r = recv(fd, &h, sizeof h, 0);
+      if (r <= 0) break;
+      if (r != (ssize_t)sizeof h) {
+        dlog("short header (%zd bytes), skipped", r);
+        continue;
+      }
+    }
+    haveHeader = 0;
     size_t len = h.length > 0 ? (size_t)h.length : 0;
-    if (len > cap) {
-      cap = len;
+    if (len + sizeof h > cap) {
+      cap = len + sizeof h;
       payload = realloc(payload, cap + 1);
     }
     // AppLoad always sends the payload as its own packet, even when it is
     // empty, so it must always be read: skipping an empty one would make
     // the next header read return 0 and look like the socket closed.
-    r = recv(fd, payload, len > 0 ? len : 1, 0);
+    r = recv(fd, payload, cap, 0);
     if (r < 0 || (r == 0 && len > 0)) break;
+    // If AppLoad failed to send a payload, the next packet is already the
+    // following message's header: resynchronise on it instead of drifting.
+    if ((size_t)r != (len > 0 ? len : (size_t)r)) {
+      dlog("type %d: expected %zu bytes, got %zd", h.type, len, r);
+      if (r == (ssize_t)sizeof h) {
+        memcpy(&h, payload, sizeof h);
+        haveHeader = 1;
+      }
+      free(part);
+      part = NULL;
+      partLen = 0;
+      continue;
+    }
     len = (size_t)r;
     payload[len] = 0;
+
+    if (h.type == MSG_PART) {
+      char *grown = realloc(part, partLen + len + 1);
+      if (!grown || partLen + len > MAX_FILE_SIZE * 2) {
+        dlog("message too large, dropped");
+        free(grown ? grown : part);
+        part = NULL;
+        partLen = 0;
+        continue;
+      }
+      part = grown;
+      memcpy(part + partLen, payload, len);
+      partLen += len;
+      continue;
+    }
+    if (part) {
+      if (partLen + len > cap) {
+        cap = partLen + len;
+        payload = realloc(payload, cap + 1);
+      }
+      memmove(payload + partLen, payload, len);
+      memcpy(payload, part, partLen);
+      len += partLen;
+      payload[len] = 0;
+      free(part);
+      part = NULL;
+      partLen = 0;
+    }
 
     switch (h.type) {
       case SYS_NEW_COORDINATOR:
@@ -497,6 +724,12 @@ int main(int argc, char **argv) {
         break;
       case MSG_STORE_SAVE:
         handle_store_save(payload);
+        break;
+      case MSG_SAVE_FILE:
+        handle_save_file(fd, payload);
+        break;
+      case MSG_IMPORT_PDF:
+        handle_import_pdf(fd, payload);
         break;
       default:
         dlog("unknown message type %d", h.type);

@@ -29,6 +29,7 @@ Item {
     property bool started: false
     property bool closeButtonVisible: !app.appInfo.standalone
     property var env: null
+    property int contextGen: 0
 
     function shutdown() {
         for (const id in timers) {
@@ -37,6 +38,75 @@ Item {
         }
         timers = {};
         if (storeDirty) flushStore();
+    }
+
+    // ---------------------------------------------------------------
+    // Bytes and base64 (QML has no TextEncoder/btoa)
+    // ---------------------------------------------------------------
+    readonly property string b64chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    property var pendingCanvasSaves: []
+
+    function utf8Bytes(str) {
+        const out = [];
+        for (let i = 0; i < str.length; i++) {
+            let c = str.charCodeAt(i);
+            if (c >= 0xD800 && c < 0xDC00 && i + 1 < str.length) {
+                c = 0x10000 + ((c - 0xD800) << 10) + (str.charCodeAt(++i) - 0xDC00);
+            }
+            if (c < 0x80) out.push(c);
+            else if (c < 0x800) out.push(0xC0 | (c >> 6), 0x80 | (c & 63));
+            else if (c < 0x10000) out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+            else out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        }
+        return out;
+    }
+
+    function latin1Bytes(str) {
+        const out = new Array(str.length);
+        for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 255;
+        return out;
+    }
+
+    function bytesToLatin1(bytes) {
+        let s = "";
+        for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, Array.prototype.slice.call(bytes, i, i + 8192));
+        return s;
+    }
+
+    function toBase64(bytes) {
+        const parts = [];
+        let chunk = "";
+        for (let i = 0; i < bytes.length; i += 3) {
+            const a = bytes[i], b = i + 1 < bytes.length ? bytes[i + 1] : 0, c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+            const n = (a << 16) | (b << 8) | c;
+            chunk += b64chars[(n >> 18) & 63] + b64chars[(n >> 12) & 63] +
+                (i + 1 < bytes.length ? b64chars[(n >> 6) & 63] : "=") + (i + 2 < bytes.length ? b64chars[n & 63] : "=");
+            if (chunk.length > 65536) { parts.push(chunk); chunk = ""; }
+        }
+        parts.push(chunk);
+        return parts.join("");
+    }
+
+    function fromBase64(str) {
+        const out = [];
+        let acc = 0, bits = 0;
+        for (let i = 0; i < str.length; i++) {
+            const v = b64chars.indexOf(str[i]);
+            if (v < 0) continue;
+            acc = ((acc << 6) | v) & 0xFFFFFF;
+            bits += 6;
+            if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 255); }
+        }
+        return out;
+    }
+
+    function finishCanvasSaves() {
+        const saves = pendingCanvasSaves;
+        pendingCanvasSaves = [];
+        for (const s of saves) {
+            if (canvas.save(s.path)) s.resolve(s.path);
+            else s.reject(new Error("could not write " + s.path));
+        }
     }
 
     // ---------------------------------------------------------------
@@ -86,6 +156,53 @@ Item {
         }
         flush();
     }
+
+    // Called when the Canvas has no usable Context2D (seen on the tablet's
+    // Qt 6.8 after AppLoad re-shows the window). Draw calls are dropped
+    // meanwhile; poll until a context works again, then redraw the page.
+    property int lostReports: 0
+    property bool redrawWhenShown: false
+    function contextLost(fresher, real) {
+        // While AppLoad has the window hidden there is no context at all;
+        // onVisibleChanged redraws when it is shown again.
+        if (!canvas.visible) { redrawWhenShown = true; return; }
+        if (lostRecovery.running) return;
+        if (lostReports++ < 5) {
+            console.log("[htmlload] canvas context unusable: available=" + canvas.available +
+                        " visible=" + canvas.visible + " size=" + canvas.width + "x" + canvas.height +
+                        " getContext=" + (fresher ? (fresher === real ? "same" : "new") : "null") +
+                        " gen=" + contextGen);
+        }
+        lostRecovery.tries = 0;
+        lostRecovery.start();
+    }
+    Timer {
+        id: lostRecovery
+        interval: 200
+        repeat: true
+        property int tries: 0
+        onTriggered: {
+            if (!canvas.visible) { stop(); app.redrawWhenShown = true; return; }
+            if (++tries > 50) { stop(); console.log("[htmlload] canvas context did not come back"); return; }
+            const c = canvas.available ? canvas.getContext("2d") : null;
+            if (!c) { canvas.requestPaint(); return; }
+            try { c.save(); c.restore(); } catch (e) { canvas.requestPaint(); return; }
+            stop();
+            console.log("[htmlload] canvas context back after " + tries * interval + " ms");
+            app.contextGen++;
+            app.dispatch("window", "resize", { type: "resize" });
+            app.dirty = true;
+            app.flush();
+        }
+    }
+
+    // The page's .then() handlers run as promise jobs, outside invoke(), so
+    // what they draw needs a repaint scheduled for after them.
+    function pageAsync(p) {
+        return p.then(v => { flushLater.restart(); return v; },
+                      e => { flushLater.restart(); throw e; });
+    }
+    Timer { id: flushLater; interval: 1; onTriggered: app.flush() }
 
     function flush() {
         if (dirty) {
@@ -280,7 +397,34 @@ Item {
     // 2D context wrapper: marks the frame dirty, accepts our Image
     // objects in drawImage, and stubs the few browser-only methods.
     // ---------------------------------------------------------------
-    function makeContext(real, canvasEl) {
+    function makeContext(initial, canvasEl) {
+        // Qt replaces the Canvas's Context2D when the item changes scene
+        // (AppLoad hiding/showing its window); the old one then throws
+        // "Not a Context2D object". Re-fetch when that happens.
+        let real = initial;
+        let gen = app.contextGen;
+        function fresh() {
+            if (gen !== app.contextGen) {
+                gen = app.contextGen;
+                real = canvas.getContext("2d") || real;
+            }
+            return real;
+        }
+        // Last font set, so measureText can estimate while no context works.
+        let fontPx = 16;
+        function retry(e, op) {
+            if (!/Context2D/.test(String(e))) return undefined;
+            const fresher = canvas.available ? canvas.getContext("2d") : null;
+            if (fresher) real = fresher;
+            gen = app.contextGen;
+            try { return op(); } catch (e2) {
+                app.contextLost(fresher, real);
+                return undefined;
+            }
+        }
+        function estimateText(str) {
+            return { width: String(str).length * fontPx * 0.55, actualBoundingBoxAscent: fontPx * 0.75, actualBoundingBoxDescent: fontPx * 0.25 };
+        }
         const extras = {
             canvas: canvasEl,
             drawImage: function (img) {
@@ -303,26 +447,58 @@ Item {
                 real.arcTo(x, y, x + w, y, r);
                 real.closePath();
             },
+            // QML's putImageData draws nothing; drawImage accepts the same
+            // pixel data and does (transforms are identity here).
+            putImageData: function (data, dx, dy) {
+                app.dirty = true;
+                real.drawImage(data, dx, dy);
+            },
             setLineDash: function () {},
             getLineDash: function () { return []; },
             resetTransform: function () { real.setTransform(1, 0, 0, 1, 0, 0); }
         };
+        function call(prop, args) {
+            app.dirty = true;
+            try { return fresh()[prop].apply(real, args); }
+            catch (e) {
+                const r = retry(e, () => real[prop].apply(real, args));
+                if (r === undefined && !/Context2D/.test(String(e))) throw e;
+                if (r === undefined && prop === "measureText") return estimateText(args[0]);
+                return r;
+            }
+        }
         return new Proxy({}, {
             get: function (t, prop) {
                 if (Object.prototype.hasOwnProperty.call(extras, prop)) {
-                    if (prop === "roundRect" && typeof real.roundRect === "function") {
-                        return function () { app.dirty = true; return real.roundRect.apply(real, arguments); };
+                    if (prop === "roundRect" && typeof fresh().roundRect === "function") {
+                        return function () { return call("roundRect", arguments); };
                     }
-                    return extras[prop];
+                    if (prop === "canvas") return extras.canvas;
+                    const f = extras[prop];
+                    return function () {
+                        fresh();
+                        try { return f.apply(null, arguments); }
+                        catch (e) {
+                            const a = arguments;
+                            const r = retry(e, () => f.apply(null, a));
+                            if (r === undefined && !/Context2D/.test(String(e))) throw e;
+                            return r;
+                        }
+                    };
                 }
-                const v = real[prop];
+                let v;
+                try { v = fresh()[prop]; } catch (e) { v = retry(e, () => real[prop]); }
                 if (typeof v === "function") {
-                    return function () { app.dirty = true; return v.apply(real, arguments); };
+                    return function () { return call(prop, arguments); };
                 }
                 return v;
             },
             set: function (t, prop, value) {
-                real[prop] = value;
+                if (prop === "font") {
+                    const m = /(\d+(?:\.\d+)?)px/.exec(String(value));
+                    if (m) fontPx = Number(m[1]);
+                }
+                try { fresh()[prop] = value; } catch (e) { retry(e, () => { real[prop] = value; return true; }); }
                 return true;
             }
         });
@@ -419,19 +595,48 @@ Item {
             matchMedia: function (q) { return { matches: /prefers-reduced-motion/.test(q), addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }; },
             getComputedStyle: function () { return {}; },
             fetch: function (url) {
-                return readText(resolvePath(baseDir, url)).then(text => ({
+                return pageAsync(readText(resolvePath(baseDir, url)).then(text => ({
                     ok: true, status: 200,
                     text: () => Promise.resolve(text),
                     json: () => Promise.resolve(JSON.parse(text))
-                }));
+                })));
             },
             close: function () { app.requestClose(); },
             // Extra API for pages that know they run on the tablet.
+            btoa: function (s) { return toBase64(latin1Bytes(String(s))); },
+            atob: function (s) { return bytesToLatin1(fromBase64(String(s))); },
             htmlload: {
                 platform: "remarkable",
                 standalone: !!app.appInfo.standalone,
+                exportsDir: app.appInfo.exports || "",
                 setCloseButtonVisible: function (v) { app.closeButtonVisible = !!v && !app.appInfo.standalone; },
-                close: function () { app.requestClose(); }
+                close: function () { app.requestClose(); },
+                // Full-screen black/white flash to clear e-ink ghosting; the
+                // canvas itself is untouched.
+                refresh: function (ms) { flashOverlay.start(ms || 90); },
+                // Saves text, a Uint8Array/ArrayBuffer or {base64} to the
+                // exports folder. Resolves with the file's path.
+                saveFile: function (name, data) {
+                    let b64;
+                    if (typeof data === "string") b64 = toBase64(utf8Bytes(data));
+                    else if (data && data.base64 !== undefined) b64 = data.base64;
+                    else b64 = toBase64(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
+                    return pageAsync(new Promise((resolve, reject) => host.saveFile(name, b64, (err, path) => err ? reject(new Error(err)) : resolve(path))));
+                },
+                // Saves what the canvas shows (after the next paint) as PNG
+                // or JPEG, picked by the name's extension.
+                saveCanvas: function (name) {
+                    return pageAsync(new Promise((resolve, reject) => {
+                        if (!app.appInfo.exports) { reject(new Error("no exports folder")); return; }
+                        pendingCanvasSaves.push({ path: app.appInfo.exports + "/" + name, resolve: resolve, reject: reject });
+                        canvas.requestPaint();
+                    }));
+                },
+                // Copies an exported PDF into the tablet's library (My Files).
+                // It appears there after the tablet restarts.
+                importPdf: function (name, title) {
+                    return pageAsync(new Promise((resolve, reject) => host.importPdf(name, title || name, (err, id) => err ? reject(new Error(err)) : resolve(id))));
+                }
             },
             console: console,
             Image: makeImageClass()
@@ -450,7 +655,7 @@ Item {
         "window", "self", "document", "localStorage", "navigator", "location", "performance",
         "setTimeout", "setInterval", "clearTimeout", "clearInterval",
         "requestAnimationFrame", "cancelAnimationFrame", "alert", "confirm", "prompt",
-        "matchMedia", "getComputedStyle", "fetch", "Image", "htmlload"
+        "matchMedia", "getComputedStyle", "fetch", "Image", "htmlload", "btoa", "atob"
     ]
     property double startTime: Date.now()
 
@@ -512,8 +717,21 @@ Item {
     Canvas {
         id: canvas
         anchors.fill: parent
-        onAvailableChanged: app.start()
+        // A new context starts blank, so the page redraws (via resize).
+        onAvailableChanged: {
+            app.contextGen++;
+            if (app.started) { if (available) resizeDebounce.restart(); }
+            else app.start();
+        }
+        onContextChanged: { app.contextGen++; if (app.started) resizeDebounce.restart(); }
+        onVisibleChanged: {
+            if (!visible || !app.started || !app.redrawWhenShown) return;
+            app.redrawWhenShown = false;
+            app.contextGen++;
+            resizeDebounce.restart();
+        }
         onImageLoaded: app.checkPendingImages()
+        onPainted: if (app.pendingCanvasSaves.length) app.finishCanvasSaves()
         onWidthChanged: resizeDebounce.restart()
         onHeightChanged: resizeDebounce.restart()
     }
@@ -527,6 +745,22 @@ Item {
             app.flush();
         }
     }
+
+    // Two-finger pinch arrives as "htmlpinch" events ({phase: "start" |
+    // "move" | "end", scale, centerX, centerY}); single touches and the pen
+    // go through the MouseArea inside as pointer/mouse/click events.
+    PinchArea {
+        anchors.fill: parent
+        function pinchEvent(phase, pinch) {
+            const ev = { type: "htmlpinch", phase: phase, scale: pinch.scale, centerX: pinch.center.x, centerY: pinch.center.y,
+                         preventDefault: function () {}, stopPropagation: function () {} };
+            app.dispatch("canvas", "htmlpinch", ev);
+            app.dispatch("window", "htmlpinch", ev);
+            app.flush();
+        }
+        onPinchStarted: (pinch) => pinchEvent("start", pinch)
+        onPinchUpdated: (pinch) => pinchEvent("move", pinch)
+        onPinchFinished: (pinch) => pinchEvent("end", pinch)
 
     MouseArea {
         anchors.fill: parent
@@ -545,6 +779,37 @@ Item {
             app.sendPointer(moved ? ["pointerup", "mouseup"] : ["pointerup", "mouseup", "click"], mouse.x, mouse.y);
         }
         onCanceled: app.sendPointer(["pointercancel"], downX, downY)
+    }
+    }
+
+    // htmlload.refresh(): black, then white, then the page again.
+    Rectangle {
+        id: flashOverlay
+        anchors.fill: parent
+        visible: false
+        z: 50
+        property int stepMs: 90
+        property bool dark: true
+        color: dark ? "black" : "white"
+        function start(ms) {
+            stepMs = ms;
+            dark = true;
+            visible = true;
+            flashTimer.restart();
+        }
+        Timer {
+            id: flashTimer
+            interval: flashOverlay.stepMs
+            onTriggered: {
+                if (flashOverlay.dark) {
+                    flashOverlay.dark = false;
+                    restart();
+                } else {
+                    flashOverlay.visible = false;
+                }
+            }
+        }
+        MouseArea { anchors.fill: parent }
     }
 
     // Back to the launcher (hidden for packaged single-app builds, and for

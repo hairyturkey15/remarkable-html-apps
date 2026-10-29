@@ -18,7 +18,7 @@ cp LICENSE "$STAGE/LICENSE"
 
 cat > "$STAGE/install.sh" <<'EOF'
 #!/bin/bash
-# Installs HTML Apps (+ Chess) on a reMarkable with xovi and AppLoad.
+# Installs HTML Apps on a reMarkable with xovi and AppLoad.
 #   ./install.sh [tablet-ip]      (default 10.11.99.1, the USB address)
 # Asks for the tablet's root password once unless you use an SSH key.
 set -e
@@ -35,7 +35,7 @@ EOF
 chmod +x "$STAGE/install.sh"
 
 cat > "$STAGE/INSTALL.txt" <<EOF
-HTML Apps + Chess for reMarkable ($VERSION)
+HTML Apps for reMarkable ($VERSION)
 
 Needs: a reMarkable Paper Pro, Paper Pro Move or Paper Pure (64-bit) in
 developer mode, with xovi and AppLoad installed.
