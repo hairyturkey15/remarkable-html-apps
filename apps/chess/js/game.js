@@ -268,6 +268,11 @@
   // ------------------------------------------------------------------
   function flashRefresh() {
     if (flashing) return;
+    // The runtime flashes natively without redrawing the board: fastest.
+    if (onTablet && htmlload.refresh) {
+      htmlload.refresh(80);
+      return;
+    }
     flashing = true;
     fillScreen(INK);
     timers.flash = setTimeout(function () {
@@ -275,8 +280,8 @@
       timers.flash = setTimeout(function () {
         flashing = false;
         draw();
-      }, 350);
-    }, 350);
+      }, 100);
+    }, 100);
   }
 
   function fillScreen(color) {
